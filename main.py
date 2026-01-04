@@ -612,6 +612,10 @@ class QBittorrentLoadBalancer:
         # 如果debug_add_stopped为True，直接返回，不做任何处理
         if self.config.get('debug_add_stopped', False):
             return
+            
+        # 如果快速汇报开关未启用，直接返回，不做任何处理
+        if not self.config.get('fast_announce_enabled', False):
+            return
 
         max_retries = self.config.get('max_announce_retries', 12)
         error_keywords = ["unregistered", "not registered", "not found", "not exist"]
@@ -701,7 +705,7 @@ class QBittorrentLoadBalancer:
                         reason.append("发现tracker错误信息")
 
                     # 2. 检查Peer数量
-                    if torrent.progress < 0.8 and torrent.num_leechs < 3:
+                    if torrent.progress < 0.8 and torrent.num_leechs < 2:
                         needs_announce = True
                         reason.append(f"Peer数量不足({torrent.num_leechs})")
 
