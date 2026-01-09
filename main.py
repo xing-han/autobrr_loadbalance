@@ -94,6 +94,56 @@ def parse_speed_limit(speed_str: str) -> Optional[str]:
     logger.warning(f"无法解析速度限制字符串: {speed_str}")
     return speed_str
 
+def parse_size_to_bytes(size_value: Optional[object]) -> Optional[int]:
+    """
+    解析大小字符串或数值为字节数
+    支持格式：1024, 10GB, 10 GiB, 500MB, 1.5TB
+    返回：字节数（int），无法解析时返回None
+    """
+    if size_value is None:
+        return None
+
+    if isinstance(size_value, (int, float)):
+        return int(size_value)
+
+    if not isinstance(size_value, str):
+        return None
+
+    size_str = size_value.strip().lower()
+    if not size_str:
+        return None
+
+    if size_str.isdigit():
+        return int(size_str)
+
+    pattern = r'(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib|tb|tib)?'
+    match = re.match(pattern, size_str)
+    if not match:
+        logger.warning(f"无法解析大小字符串: {size_str}")
+        return None
+
+    value = float(match.group(1))
+    unit = match.group(2) or 'b'
+
+    unit_map = {
+        'b': 1,
+        'kb': BYTES_TO_KB,
+        'kib': BYTES_TO_KB,
+        'mb': BYTES_TO_KB ** 2,
+        'mib': BYTES_TO_KB ** 2,
+        'gb': BYTES_TO_GB,
+        'gib': BYTES_TO_GB,
+        'tb': BYTES_TO_KB ** 4,
+        'tib': BYTES_TO_KB ** 4,
+    }
+
+    multiplier = unit_map.get(unit)
+    if not multiplier:
+        logger.warning(f"无法识别大小单位: {unit}")
+        return None
+
+    return int(value * multiplier)
+
 def setup_logging(log_dir=None):
     """设置日志配置，同时输出到控制台和文件"""
     # 初始化logger
@@ -185,6 +235,9 @@ class InstanceInfo:
     traffic_limit: int = 0  # 流量限制 (bytes)
     traffic_check_url: str = ""  # 流量检查URL
     reserved_space: int = 0  # 需要保留的空闲空间 (bytes)
+    category_size_limit_bytes: int = 0  # 分类体积限制 (bytes)
+    category_size_limit_categories: List[str] = field(default_factory=list)
+    category_size_total_bytes: int = 0  # 指定分类种子总大小 (bytes)
     last_update: datetime = field(default_factory=datetime.now)
     is_reconnecting: bool = False  # 是否正在重连中
 
@@ -198,6 +251,7 @@ class PendingTorrent:
     dl_limit: Optional[str] = None  # 下载速度限制 (支持带单位的字符串)
     up_limit: Optional[str] = None  # 上传速度限制 (支持带单位的字符串)
     savepath: Optional[str] = None  # 保存路径
+    size_bytes: Optional[int] = None  # 种子总大小 (bytes)
 
 
 class QBittorrentLoadBalancer:
@@ -328,6 +382,26 @@ class QBittorrentLoadBalancer:
         except (ValueError, TypeError) as e:
             logger.warning(f"实例 {config.get('name', 'Unknown')} 保留空间值转换失败：{e}，设置为默认值21GB")
             reserved_space_bytes = 21 * BYTES_TO_GB
+
+        # 安全地转换分类体积限制（从GB转换为字节）
+        try:
+            category_size_limit_gb = config.get('category_size_limit_gb', 0.0)
+            category_size_limit_bytes = int(float(category_size_limit_gb) * BYTES_TO_GB)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"实例 {config.get('name', 'Unknown')} 分类体积限制值转换失败：{e}，设置为0")
+            category_size_limit_bytes = 0
+
+        category_size_limit_categories = config.get('category_size_limit_categories', [])
+        if category_size_limit_categories is None:
+            category_size_limit_categories = []
+        if not isinstance(category_size_limit_categories, list):
+            logger.warning(
+                f"实例 {config.get('name', 'Unknown')} 分类体积限制分类配置格式错误，必须是数组，已重置为空数组"
+            )
+            category_size_limit_categories = []
+        category_size_limit_categories = [
+            str(item).strip() for item in category_size_limit_categories if str(item).strip()
+        ]
             
         return InstanceInfo(
             name=config['name'],
@@ -336,7 +410,9 @@ class QBittorrentLoadBalancer:
             password=config['password'],
             traffic_check_url=config.get('traffic_check_url', ''),
             traffic_limit=traffic_limit_bytes,
-            reserved_space=reserved_space_bytes
+            reserved_space=reserved_space_bytes,
+            category_size_limit_bytes=category_size_limit_bytes,
+            category_size_limit_categories=category_size_limit_categories
         )
         
     def _connect_instance(self, instance: InstanceInfo) -> None:
@@ -451,7 +527,8 @@ class QBittorrentLoadBalancer:
             raise
             
     def add_pending_torrent(self, download_url: str, release_name: str, category: Optional[str] = None,
-                           dl_limit: Optional[str] = None, up_limit: Optional[str] = None, savepath: Optional[str] = None) -> None:
+                           dl_limit: Optional[str] = None, up_limit: Optional[str] = None,
+                           savepath: Optional[str] = None, size_bytes: Optional[int] = None) -> None:
         """添加待处理的torrent"""
         if not download_url:
             logger.error("必须提供download_url")
@@ -460,6 +537,8 @@ class QBittorrentLoadBalancer:
         if not release_name:
             logger.error("必须提供release_name")
             return
+
+        size_bytes = parse_size_to_bytes(size_bytes)
         
         try:
             with self.pending_torrents_lock:
@@ -473,12 +552,13 @@ class QBittorrentLoadBalancer:
                         category=category,
                         dl_limit=dl_limit,
                         up_limit=up_limit,
-                        savepath=savepath
+                        savepath=savepath,
+                        size_bytes=size_bytes
                     )
                     self.pending_torrents.append(torrent)
                     logger.info(f"添加待处理种子：{release_name}")
                     # 记录附加参数信息
-                    if dl_limit or up_limit or savepath:
+                    if dl_limit or up_limit or savepath or size_bytes is not None:
                         extra_info = []
                         if dl_limit:
                             extra_info.append(f"下载限制={dl_limit}")
@@ -486,6 +566,8 @@ class QBittorrentLoadBalancer:
                             extra_info.append(f"上传限制={up_limit}")
                         if savepath:
                             extra_info.append(f"保存路径={savepath}")
+                        if size_bytes is not None:
+                            extra_info.append(f"大小={size_bytes / BYTES_TO_GB:.2f}GB")
                         logger.info(f"种子参数：{', '.join(extra_info)}")
                 else:
                     logger.debug(f"种子已在待处理列表中：{release_name}")
@@ -541,6 +623,19 @@ class QBittorrentLoadBalancer:
         # 从torrents信息计算活跃下载数
         all_torrents = maindata.get('torrents', {}).values()
         instance.active_downloads = len([t for t in all_torrents if t.state == 'downloading'])
+
+        # 统计指定分类的种子总大小
+        if instance.category_size_limit_bytes > 0 and instance.category_size_limit_categories:
+            categories_set = set(instance.category_size_limit_categories)
+            category_total_bytes = 0
+            for torrent in all_torrents:
+                torrent_category = getattr(torrent, 'category', '')
+                if torrent_category in categories_set:
+                    torrent_size = self._get_torrent_total_size(torrent)
+                    category_total_bytes += torrent_size
+            instance.category_size_total_bytes = category_total_bytes
+        else:
+            instance.category_size_total_bytes = 0
         
         instance.last_update = datetime.now()
         instance.success_metrics_count += 1  # 成功获取统计信息，计数器加1
@@ -556,6 +651,16 @@ class QBittorrentLoadBalancer:
                    f"空间={instance.free_space/BYTES_TO_GB:.1f}/{instance.reserved_space/BYTES_TO_GB:.1f}GB，"
                    f"更新={instance.success_metrics_count}，"
                    f"历史任务={instance.total_added_tasks_count}")
+
+    def _get_torrent_total_size(self, torrent: any) -> int:
+        """获取种子总大小（最终下载完成占用空间大小）"""
+        size = getattr(torrent, 'size', None)
+        if size is None:
+            size = getattr(torrent, 'total_size', 0)
+        try:
+            return int(size or 0)
+        except (TypeError, ValueError):
+            return 0
 
 
     def _check_instance_traffic(self, instance: InstanceInfo) -> None:
@@ -605,6 +710,35 @@ class QBittorrentLoadBalancer:
         if not within_limit:
             logger.warning(f"实例 {instance.name} 流量超限：出站流量={instance.traffic_out/BYTES_TO_GB:.2f}GB，限制={instance.traffic_limit/BYTES_TO_GB:.2f}GB")
         
+        return within_limit
+
+    def _is_category_size_within_limit(self, instance: InstanceInfo, torrent: PendingTorrent) -> bool:
+        """检查指定分类的种子总大小是否在限制范围内"""
+        if instance.category_size_limit_bytes <= 0 or not instance.category_size_limit_categories:
+            return True
+
+        if not torrent.category or torrent.category not in instance.category_size_limit_categories:
+            return True
+
+        if torrent.size_bytes is None:
+            logger.warning(
+                f"实例 {instance.name} 无法校验分类体积限制：缺少种子大小 "
+                f"({torrent.release_name})"
+            )
+            return False
+
+        projected_total = instance.category_size_total_bytes + torrent.size_bytes
+        within_limit = projected_total < instance.category_size_limit_bytes
+
+        if not within_limit:
+            logger.warning(
+                f"实例 {instance.name} 分类体积超限：当前="
+                f"{instance.category_size_total_bytes / BYTES_TO_GB:.2f}GB，"
+                f"新增={torrent.size_bytes / BYTES_TO_GB:.2f}GB，"
+                f"限制={instance.category_size_limit_bytes / BYTES_TO_GB:.2f}GB，"
+                f"分类={torrent.category}"
+            )
+
         return within_limit
                    
     def _process_instance_announces(self, instance: InstanceInfo, maindata: dict) -> None:
@@ -821,7 +955,7 @@ class QBittorrentLoadBalancer:
             # 默认使用上传速度
             return instance.upload_speed
         
-    def _select_best_instance(self) -> Optional[InstanceInfo]:
+    def _select_best_instance(self, torrent: PendingTorrent) -> Optional[InstanceInfo]:
         """选择最佳的实例来分配新任务"""
         with self.instances_lock:
             available_instances = [
@@ -829,7 +963,8 @@ class QBittorrentLoadBalancer:
                 if instance.is_connected and 
                 instance.new_tasks_count < self.config['max_new_tasks_per_instance'] and
                 instance.free_space > instance.reserved_space and
-                self._is_traffic_within_limit(instance)
+                self._is_traffic_within_limit(instance) and
+                self._is_category_size_within_limit(instance, torrent)
             ]
             
             if not available_instances:
@@ -908,8 +1043,16 @@ class QBittorrentLoadBalancer:
             result = instance.client.torrents_add(**add_params)
             
             if result and result.startswith('Ok'):
-                instance.new_tasks_count += 1
-                instance.total_added_tasks_count += 1  # 增加累计任务计数
+                with self.instances_lock:
+                    instance.new_tasks_count += 1
+                    instance.total_added_tasks_count += 1  # 增加累计任务计数
+                    if (
+                        instance.category_size_limit_bytes > 0
+                        and instance.category_size_limit_categories
+                        and torrent.category in instance.category_size_limit_categories
+                        and torrent.size_bytes is not None
+                    ):
+                        instance.category_size_total_bytes += torrent.size_bytes
                 log_msg = f"成功添加种子到实例 {instance.name}：{torrent.release_name}"
                 if torrent.category:
                     log_msg += f"（分类：{torrent.category}）"
@@ -940,7 +1083,7 @@ class QBittorrentLoadBalancer:
                 
             # 处理所有待处理的torrent URL
             for torrent in self.pending_torrents[:]:  # 使用切片避免修改列表时的问题
-                instance = self._select_best_instance()
+                instance = self._select_best_instance(torrent)
                 if instance:
                     if self._add_torrent_to_instance(instance, torrent):
                         self.pending_torrents.remove(torrent)
