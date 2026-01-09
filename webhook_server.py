@@ -78,7 +78,7 @@ class WebhookServer:
             if not torrent_data:
                 return False
             
-            release_name, download_url, indexer, category, dl_limit, up_limit, savepath = torrent_data
+            release_name, download_url, indexer, category, dl_limit, up_limit, savepath, size_bytes = torrent_data
             logger.info(f"接收到种子：{release_name} (来源：{indexer})")
             
             # 记录附加参数
@@ -89,6 +89,8 @@ class WebhookServer:
                 extra_params.append(f"上传限制={up_limit}")
             if savepath:
                 extra_params.append(f"保存路径={savepath}")
+            if size_bytes is not None:
+                extra_params.append(f"大小={size_bytes}")
             if extra_params:
                 logger.info(f"种子参数：{', '.join(extra_params)}")
             
@@ -99,7 +101,8 @@ class WebhookServer:
                 category=category or indexer,
                 dl_limit=dl_limit,
                 up_limit=up_limit,
-                savepath=savepath
+                savepath=savepath,
+                size_bytes=size_bytes
             )
             return True
             
@@ -116,6 +119,7 @@ class WebhookServer:
         dl_limit = data.get('dl_limit', data.get('dlLimit', None))  # 支持两种字段名
         up_limit = data.get('up_limit', data.get('upLimit', None))  # 支持两种字段名
         savepath = data.get('savepath', data.get('savePath', None))  # 支持两种字段名
+        size_bytes = data.get('size_bytes', data.get('sizeBytes', data.get('size', None)))
         
         if not release_name:
             logger.error("webhook数据缺少种子名称")
@@ -125,7 +129,7 @@ class WebhookServer:
             logger.error("webhook数据缺少下载链接")
             return None
         
-        return release_name, download_url, indexer, category, dl_limit, up_limit, savepath
+        return release_name, download_url, indexer, category, dl_limit, up_limit, savepath, size_bytes
     
 
     

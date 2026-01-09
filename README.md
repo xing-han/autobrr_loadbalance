@@ -47,7 +47,8 @@ chmod +x docker-start.sh
   "category": "TV",
   "dl_limit": "5MB/s",
   "up_limit": "1MB/s",
-  "savepath": "/downloads/TV"
+  "savepath": "/downloads/TV",
+  "size": "{{.Size}}"
 }
 ```
 图示：
@@ -94,6 +95,16 @@ python run.py
 | `traffic_check_url` | 流量检查 API URL |
 | `traffic_limit` | 流量限制（MB），超限实例会被跳过 |
 | `reserved_space` | 需要保留的空闲空间（MB），低于此值的实例会被跳过 |
+
+### 可选配置（分类体积限制）
+
+| 参数 | 说明 |
+|------|------|
+| `category_size_limit_gb` | 指定分类种子总大小限制（GB），0为禁用 |
+| `category_size_limit_categories` | 需要统计的分类列表，多个分类时为总和（合并统计） |
+
+> 提示：启用分类体积限制时，Webhook 需提供 `size`/`size_bytes` 字段用于计算新种子大小。
+> autobrr 的 `{{.Size}}` 为 uint（bytes），可直接作为 `size` 字段传入。
 
 流量限制参数traffic_check_url和traffic_limit支持两种应用场景：
 1. 配套`https://github.com/guowanghushifu/netcup-traffic-tester`使用，traffic_limit填2000000
