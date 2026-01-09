@@ -1043,15 +1043,16 @@ class QBittorrentLoadBalancer:
             result = instance.client.torrents_add(**add_params)
             
             if result and result.startswith('Ok'):
-                instance.new_tasks_count += 1
-                instance.total_added_tasks_count += 1  # 增加累计任务计数
-                if (
-                    instance.category_size_limit_bytes > 0
-                    and instance.category_size_limit_categories
-                    and torrent.category in instance.category_size_limit_categories
-                    and torrent.size_bytes is not None
-                ):
-                    instance.category_size_total_bytes += torrent.size_bytes
+                with self.instances_lock:
+                    instance.new_tasks_count += 1
+                    instance.total_added_tasks_count += 1  # 增加累计任务计数
+                    if (
+                        instance.category_size_limit_bytes > 0
+                        and instance.category_size_limit_categories
+                        and torrent.category in instance.category_size_limit_categories
+                        and torrent.size_bytes is not None
+                    ):
+                        instance.category_size_total_bytes += torrent.size_bytes
                 log_msg = f"成功添加种子到实例 {instance.name}：{torrent.release_name}"
                 if torrent.category:
                     log_msg += f"（分类：{torrent.category}）"
